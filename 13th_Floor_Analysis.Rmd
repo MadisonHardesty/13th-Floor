@@ -1,0 +1,486 @@
+---
+title: "Investigating the Impact of the 13th Floor on NYC Property Values"
+author: "Madison Hardesty and Jonathan Auerbach"
+date: "February 2024"
+output: 
+  html_document:
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("tidyverse")
+library("geomtextpath")
+library("gridExtra")
+library("ggpubr")
+library("knitr")
+library("MatchIt")
+library("scales")
+library("car")
+```
+
+# Research Question
+Does relabeling the 13th floor increase the price of the properties on that floor in NYC residential buildings? \n
+
+# Data Source
+We consider both the market value of condos as assessed by the New York City Department of Finance in 2023 ([bit.ly/492AQYi](bit.ly/492AQYi)), and the most-recent sales price of the condos that were sold in the last 20 years ([bit.ly/48oppd1](bit.ly/48oppd1)). \n
+**Note:** See 13th_Floor_Prep.R for details on how we merged and prepared the data.\n 
+
+## Variable Definitions 
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+data.frame(
+  Variable = c("BORO", "BLOCK", "BLD_ID", "BLD_STORY", "BLD_FRT", "BLD_DEP", "CONDO_NUMBER", "COOP_APTS", "APTNO", "APT_FLOOR", "TRECE", "MARKET_VALUE", "SALE_PRICE", "YRBUILT",  "GROSS_SQFT"),
+  Type = c("numeric", "numeric", "character", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "logical", "numeric", "numeric", "numeric", "numeric"),
+  Description = c("The borough the building is located in.",
+                  "The block the building is located on.",
+                  "Building identifier created by combining the property's BORO, BLOCK, CONDO_NUMBER, BLD_FRT, BLD_DEP.",
+                  "The number of stories/floors in the building.",
+                  "The frontage of the lot",
+                  "The depth of the lot",
+                  "The condominium identification number.",
+                  "The number of residential units.",
+                  "The apartment number.",
+                  "The floor level the property is located on. Cleaned from APTNO variable.",
+                  "Indicates the presence (TRUE) or absence (FALSE) of a 13th floor in the building. If it is 'missing' the 13th floor, then it was relabeled.",
+                  "The market value of the unit.",
+                  "The sale price of the unit.",
+                  "The year the building was built",
+                  "The gross square footage of the unit"
+  )
+) %>%
+  arrange(Variable) %>%
+  kable(format = "markdown")
+```
+
+# Preparing the Data
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+# import dataset
+dataNYC <- read_csv("dataNYC.csv")
+
+# create wide format data sets for market value and sales price
+dataNYCwide <- function(data, value_col) {
+  data %>%
+    select(BLD_ID, APT_FLOOR, TRECE, everything()) %>%
+    distinct(BLD_ID, APT_FLOOR, TRECE, .keep_all = TRUE) %>%
+    pivot_wider(
+      id_cols = c(BLD_ID, TRECE),
+      names_prefix = "Floor_",
+      names_from = APT_FLOOR,
+      values_from = value_col,
+      names_sort = TRUE) %>%
+    left_join(distinct(select(dataNYC, BLD_ID, AVG_12TH_SQFT, AVG_13TH_SQFT, AVG_13TH_YRBUILT)), by = "BLD_ID")
+  }
+
+dataNYCwideMarketValue <- dataNYCwide(dataNYC, "AVG_LOG_MARKET_VALUE_PER_FLOOR")
+dataNYCwideSalePrice <- dataNYCwide(dataNYC, "AVG_LOG_SALE_PRICE_PER_FLOOR")
+```
+
+How many buildings in NYC have more than 13 stories? `r nrow(dataNYCwideMarketValue)` \n
+
+What percentage of these buildings include a 13th floor address? `r round(nrow(distinct(filter(dataNYC, APT_FLOOR_OLD == 13), BLD_ID)) / length(unique(dataNYC$BLD_ID)) * 100, 1)`% \n
+
+What percentage of these buildings include a 14th floor address or higher? `r round(nrow(distinct(filter(dataNYC, APT_FLOOR_OLD >= 14), BLD_ID)) / length(unique(dataNYC$BLD_ID)) * 100, 1)`% \n
+
+How many condos are located on the 13th floor in relabeled buildings? `r length(which(dataNYC$APT_FLOOR == 13 & dataNYC$TRECE == FALSE))` \n
+
+How many condos are located on the 13th floor in non-relabeled buildings? `r length(which(dataNYC$APT_FLOOR == 13 & dataNYC$TRECE == TRUE))` \n
+
+## Data Preview
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+kable(head(dataNYC[, c("BLD_ID", "BLD_STORY", "APT_FLOOR", "TRECE", "MARKET_VALUE", "SALE_PRICE", "YRBUILT", "GROSS_SQFT")], 5), format = "markdown")
+```
+
+## Summary Statistics
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+kable(summary(dataNYC[, c("BLD_STORY", "APT_FLOOR", "MARKET_VALUE", "SALE_PRICE", "YRBUILT", "GROSS_SQFT")]), format = "markdown")
+```
+
+## Number of Condos per Floor
+```{r message=FALSE, warning=FALSE}
+# we want to plot the original floor levels, not the adjusted "True" floor 
+(plot1 <- ggplot() + 
+    geom_bar(aes(x = as.numeric(dataNYC$APT_FLOOR_OLD), fill = as.factor(dataNYC$TRECE)), position = "identity", alpha = 0.9, color = "black") +
+    xlab("Floor") + ylab("Number of Condos") + labs(fill = "13th Floor") + 
+    scale_x_discrete(limits = c(seq(0, 100, by = 5)), labels = as.character(seq(0, 100, by = 5))) +
+    scale_fill_manual(values = c("#00047A", "#7E84F7"), labels = c("Relabeled", "Not Relabeled")) +
+    theme_minimal(base_size = 12) +
+    guides(color = guide_legend(reverse = TRUE)))
+```  
+
+# Market Value Analysis
+## DiD method
+```{r, warning=FALSE, message=FALSE}
+# treatment group
+treated_13 <- dataNYC$LOG_MARKET_VALUE[which(dataNYC$APT_FLOOR == 13 & dataNYC$TRECE == FALSE)] # after intervention
+avg_treated_13 <- mean(treated_13, na.rm = TRUE)
+
+treated_12 <- dataNYC$LOG_MARKET_VALUE[which(dataNYC$APT_FLOOR == 12 & dataNYC$TRECE == FALSE)] # before intervention
+avg_treated_12 <- mean(treated_12, na.rm = TRUE)
+
+# control group
+control_13 <- dataNYC$LOG_MARKET_VALUE[which(dataNYC$APT_FLOOR == 13 & dataNYC$TRECE == TRUE)] # after intervention
+avg_control_13 <- mean(control_13, na.rm = TRUE)
+
+control_12 <- dataNYC$LOG_MARKET_VALUE[which(dataNYC$APT_FLOOR == 12 & dataNYC$TRECE == TRUE)] # before intervention
+avg_control_12 <- mean(control_12, na.rm = TRUE)
+```
+
+The average 13th floor condo market value in a relabeled building is `r dollar(exp(avg_treated_13))`. \n
+
+The average 13th floor condo market value in a non-relabeled building is `r dollar(exp(avg_control_13))`. \n
+
+The percent increase between the average 13th floor condo market value in relabeled and non-relabeled buildings is `r round((exp(avg_treated_13 - avg_control_13) - 1) * 100, 1)`%. \n
+
+The average 12th floor condo market value in a non-relabeled/control building is `r dollar(exp(avg_control_12))`. \n
+
+The average 12th floor condo market value in a relabeled/treated building is `r dollar(exp(avg_treated_12))`. \n
+
+The percent increase between the average 12th floor condo market value in relabeled and non-relabeled buildings is `r round((exp(avg_treated_12 - avg_control_12) - 1) * 100, 1)`%. \n
+
+The excess increase of `r round((exp(avg_treated_13 - avg_control_13) - 1) * 100, 1)`% over `r round((exp(avg_treated_12 - avg_control_12) - 1) * 100, 1)`% is `r round(((exp(avg_treated_13 - avg_control_13) / exp(avg_treated_12 - avg_control_12)) - 1) * 100, 1)`%, which is the DiD estimate. \n
+
+### Parallel Lines Assumption
+```{r, warning=FALSE, message=FALSE}
+# calculate the DiD estimate 
+diff_after <- avg_treated_13 - avg_control_13
+diff_before <- avg_treated_12 - avg_control_12
+did_estimate <- diff_after - diff_before
+
+# compile data for plot
+data <- data.frame(
+  Floor = factor(rep(c('12th Floor', '13th Floor'), each = 2)),
+  Type = factor(c('Relabeled', 'Not Relabeled', 'Relabeled', 'Not Relabeled')),
+  Value = c(exp(avg_treated_12),
+            exp(avg_control_12), 
+            exp(avg_treated_13),
+            exp(avg_control_13)))
+
+# assumed increase line
+dotted_line_data <- data.frame(
+  Floor = c("12th Floor", "13th Floor"),
+  Type = c("Relabeled", "Relabeled"),
+  Value = c(exp(avg_treated_12), exp(avg_control_13) - exp(avg_control_12) + exp(avg_treated_12)))
+
+# parallel lines plot
+(plot2 <- data %>%
+  ggplot(aes(x = Floor, y = Value, group = Type, color = Type)) +
+  geom_line(size = 1.5) +
+  geom_point(size = 3) +
+  labs(x = "", y = "Average Market Value", color = "13th Floor") +
+  geom_line(data = dotted_line_data, aes(x = Floor, y = Value, group = Type, color = Type), size = 1.5, linetype = 2, color = "#C51E3A") +
+  geom_point(data = dotted_line_data, aes(x = Floor, y = Value, group = Type, color = Type), size = 3, color = "#C51E3A") +
+  geom_segment(aes(x = 2, y = exp(avg_treated_13) - 1000, xend = 2, yend = (exp(avg_control_13) - exp(avg_control_12) + exp(avg_treated_12)) + 1000), color = "black", size = .8, arrow = arrow(type = "open", ends = "both", length = unit(0.1, "inches"))) +
+  annotate("text", size = 3, hjust = 0, x = 2.05, y = (exp(avg_treated_13) + (exp(avg_control_13) - exp(avg_control_12) + exp(avg_treated_12)))/2, label= "Estimated Effect", color = "black") +
+  annotate("text", size = 3, hjust = 0, x = 2.05, y = exp(avg_treated_13), label= "Relabeled", color = "#00047A") + 
+  annotate("text", size = 3, hjust = 0, x = 2.05, y = exp(avg_control_13), label= "Not Relabeled", color = "#7E84F7") +
+  annotate("text", size = 3, hjust = 0, x = 2.05, y = exp(avg_control_13) - exp(avg_control_12) + exp(avg_treated_12), label= "Expected Increase\nif No Effect", color = "#C51E3A") +
+  scale_color_manual(values = c("Relabeled" = "#00047A", "Not Relabeled" = "#7E84F7")) +
+  scale_y_continuous(limits = c(240000, 310000), labels = label_number(prefix = "$", big.mark = ",")) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none"))
+```
+
+## Matching Method
+```{r, warning=FALSE, message=FALSE}
+dataNYCwideMarketValue <- filter(dataNYCwideMarketValue, !is.na(Floor_12), !is.na(AVG_12TH_SQFT))
+
+match.out <- matchit(TRECE ~ Floor_12 + AVG_12TH_SQFT, # match on 12th floor prices ('Floor_12') and size ('AVG_12TH_SQFT')
+                     data = dataNYCwideMarketValue, 
+                     method = "nearest", 
+                     distance = "mahalanobis", 
+                     replace = FALSE, 
+                     ratio = 1)
+
+# plot density distributions 
+plot(match.out, type = "density")
+summary(match.out)
+
+matchedData <- match.data(match.out, data = dataNYCwideMarketValue, group = "all")
+matchedData <- matchedData[order(matchedData$subclass, decreasing = FALSE),]
+
+# our treatment group consists of buildings that relabeled the 13th floor
+matchedTreated <- matchedData[which(matchedData$TRECE == FALSE),]
+matchedControl <- matchedData[which(matchedData$TRECE == TRUE),]
+
+# extract the 13th floor values for both matched treated and control groups 
+matched_treated_13 <- matchedTreated$Floor_13
+matched_control_13 <- matchedControl$Floor_13
+```
+
+```{r, warning=FALSE, message=FALSE}
+# calculate the mean difference in log prices 
+mean_difference <- mean(matched_treated_13 - matched_control_13, na.rm = TRUE)
+```
+
+The average price increase in non-relabeled buildings to relabeled buildings is `r round((exp(mean_difference) - 1) * 100, 1)`%. \n
+
+### Average Condo Price per Floor in Unmatched and Matched Buildings
+```{r, warning=FALSE, message=FALSE}
+# calculate the average value for each floor
+average_prices <- dataNYC %>%
+  filter(APT_FLOOR >= 10 & APT_FLOOR <= 15) %>% 
+  group_by(APT_FLOOR, TRECE) %>%
+  summarize(AvgPrice = exp(mean(LOG_MARKET_VALUE, na.rm = TRUE))) %>%
+  ungroup() 
+
+# plot the averages as a bar chart
+plot3 <- ggplot(average_prices, aes(x = as.factor(APT_FLOOR), y = AvgPrice, fill = as.factor(TRECE))) +
+  geom_bar(stat = "identity", position = "identity", color = "black", alpha = 0.9) +
+  xlab("True Floor") + ylab("Average Sale Price") + labs(fill = "13th Floor") +
+  scale_fill_manual(values = c("#00047A", "#7E84F7"), labels = c("Relabeled", "Not Relabeled")) +
+  scale_y_continuous(limits = c(0, 340000), labels = dollar_format()) + 
+  theme_minimal(base_size = 12)
+
+# reshape the data from wide to long format
+data_long <- matchedData %>%
+  pivot_longer(cols = starts_with("Floor_"), names_to = "Floor", values_to = "Value") %>%
+  mutate(Floor = as.numeric(str_remove(Floor, "Floor_"))) %>%
+  filter(!is.na(Floor), Floor >= min(dataNYC$APT_FLOOR, na.rm = TRUE), Floor <= max(dataNYC$APT_FLOOR, na.rm = TRUE))
+
+# calculate the average value for each floor
+average_values <- data_long %>%
+  filter(Floor >= 10 & Floor <= 15) %>% 
+  group_by(Floor, TRECE) %>%
+  summarise(Average_Value = mean(Value, na.rm = TRUE), .groups = 'drop')
+
+# plot the averages as a bar chart
+plot4 <- ggplot(average_values, aes(x = as.factor(Floor), y = exp(Average_Value), fill = as.factor(TRECE))) +
+  geom_bar(stat = "identity", position = "identity", color = "black", alpha = 0.9) +
+  xlab("True Floor") + ylab("Average Market Value") + labs(fill = "13th Floor") +
+  scale_fill_manual(values = c("#00047A", "#7E84F7"), labels = c("Relabeled", "Not Relabeled")) +
+  scale_y_continuous(limits = c(0, 340000), labels = dollar_format()) + 
+  theme_minimal(base_size = 12)
+
+# combine plots
+ggarrange(plot3 + ylab("Average Market Value Before Matching"), plot4 + ylab("Average Market Value After Matching"), ncol = 2, common.legend = TRUE, legend = "right")
+```
+
+### Covariate Balance Plots
+```{r message=FALSE, warning=FALSE}
+dataNYCwideMarketValue$MATCHED <- "Unmatched" # all buildings
+matchedData$MATCHED <- "Matched" # only buildings we matched on
+
+# function that returns the average of the covariate for control/treatment and matched/unmatched
+calculate_stats <- function(data, covariate) {
+    stats <- data %>%
+      group_by(TRECE, MATCHED) %>%
+      summarise(STATISTIC = mean(get(covariate), na.rm = TRUE)) 
+  return(stats)}
+
+# function that plots the calculate_stats output
+create_covariate_balance_plot <- function(data, yaxis) {
+  ggplot(data, aes(x = MATCHED, y = STATISTIC, fill = TRECE)) +
+    geom_bar(stat = "identity", position = position_dodge(), alpha = 0.9, color = "black") +
+    labs(x = '', y = yaxis, fill = '') +
+    scale_fill_manual(values = c("#00047A", "#7E84F7"), labels = c("Relabeled", "Not Relabeled")) + 
+    theme_minimal(base_size = 12)}
+
+# balance plot for 13th floor size
+combined_stats <- rbind(
+  calculate_stats(dataNYCwideMarketValue, 'AVG_13TH_SQFT'),
+  calculate_stats(matchedData, 'AVG_13TH_SQFT'))
+
+combined_stats$MATCHED <- factor(combined_stats$MATCHED, levels = c("Unmatched", "Matched"))
+plot7 <- create_covariate_balance_plot(combined_stats, 'Average Square Footage') + coord_cartesian(ylim = c(150, 1600)) +
+  scale_y_continuous(breaks = seq(150, 1600, by = 450))
+
+# balance plot for building construction year
+combined_stats <- rbind(
+  calculate_stats(dataNYCwideMarketValue, 'AVG_13TH_YRBUILT'),
+  calculate_stats(matchedData, 'AVG_13TH_YRBUILT')) 
+combined_stats$MATCHED <- factor(combined_stats$MATCHED, levels = c("Unmatched", "Matched"))
+plot8 <- create_covariate_balance_plot(combined_stats, 'Average Construction Year') + coord_cartesian(ylim = c(1800, 2000)) +
+  scale_y_continuous(breaks = seq(1800, 2000, by = 50))
+
+# combined plot
+ggarrange(plot7, plot8, ncol = 2, common.legend = TRUE, legend = "right")
+```
+
+# Sale Price Analysis
+## DiD Method
+```{r, warning=FALSE, message=FALSE}
+# treatment group
+treated_13 <- dataNYC$LOG_SALE_PRICE[which(dataNYC$APT_FLOOR == 13 & dataNYC$TRECE == FALSE)] # after intervention
+avg_treated_13 <- mean(treated_13, na.rm = TRUE)
+
+treated_12 <- dataNYC$LOG_SALE_PRICE[which(dataNYC$APT_FLOOR == 12 & dataNYC$TRECE == FALSE)] # before intervention
+avg_treated_12 <- mean(treated_12, na.rm = TRUE)
+
+# control group
+control_13 <- dataNYC$LOG_SALE_PRICE[which(dataNYC$APT_FLOOR == 13 & dataNYC$TRECE == TRUE)] # after intervention
+avg_control_13 <- mean(control_13, na.rm = TRUE)
+
+control_12 <- dataNYC$LOG_SALE_PRICE[which(dataNYC$APT_FLOOR == 12 & dataNYC$TRECE == TRUE)] # before intervention
+avg_control_12 <- mean(control_12, na.rm = TRUE)
+```
+
+The average 13th floor condo sale price in a relabeled building is `r dollar(exp(avg_treated_13))`. \n
+
+The average 13th floor condo sale price in a non-relabeled building is `r dollar(exp(avg_control_13))`. \n
+
+The percent increase between the average 13th floor condo sale price in relabeled and non-relabeled buildings is `r round((exp(avg_treated_13 - avg_control_13) - 1) * 100, 1)`%. \n
+
+The average 12th floor condo sale price in a non-relabeled/control building is `r dollar(exp(avg_control_12))`. \n
+
+The average 12th floor condo sale price in a relabeled/treated building is `r dollar(exp(avg_treated_12))`. \n
+
+The percent increase between the average 12th floor condo sale price in relabeled and non-relabeled buildings is `r round((exp(avg_treated_12 - avg_control_12) - 1) * 100, 1)`%. \n
+
+The excess increase of `r round((exp(avg_treated_13 - avg_control_13) - 1) * 100, 1)`% over `r round((exp(avg_treated_12 - avg_control_12) - 1) * 100, 1)`% is `r round(((exp(avg_treated_13 - avg_control_13) / exp(avg_treated_12 - avg_control_12)) - 1) * 100, 1)`%. \n
+
+### Parallel Lines Assumption
+```{r, warning=FALSE, message=FALSE}
+# calculate the DiD estimate 
+diff_after <- avg_treated_13 - avg_control_13
+diff_before <- avg_treated_12 - avg_control_12
+did_estimate <- diff_after - diff_before
+
+# compile data for plot
+data <- data.frame(
+  Floor = factor(rep(c('12th Floor', '13th Floor'), each = 2)),
+  Type = factor(c('Relabeled', 'Not Relabeled', 'Relabeled', 'Not Relabeled')),
+  Value = c(exp(avg_treated_12),
+            exp(avg_control_12), 
+            exp(avg_treated_13),
+            exp(avg_control_13)))
+
+# assumed increase line
+dotted_line_data <- data.frame(
+  Floor = c("12th Floor", "13th Floor"),
+  Type = c("Relabeled", "Relabeled"),
+  Value = c(exp(avg_treated_12), exp(avg_control_13) - exp(avg_control_12) + exp(avg_treated_12)))
+
+# parallel lines plot
+(plot2 <- data %>%
+  ggplot(aes(x = Floor, y = Value, group = Type, color = Type)) +
+  geom_line(size = 1.5) +
+  geom_point(size = 3) +
+  labs(x = "", y = "Average Sale Price", color = "13th Floor") +
+  geom_line(data = dotted_line_data, aes(x = Floor, y = Value, group = Type, color = Type), size = 1.5, linetype = 2, color = "#C51E3A") +
+  geom_point(data = dotted_line_data, aes(x = Floor, y = Value, group = Type, color = Type), size = 3, color = "#C51E3A") +
+  geom_segment(aes(x = 2, y = exp(avg_treated_13) - 5000, xend = 2, yend = (exp(avg_control_13) - exp(avg_control_12) + exp(avg_treated_12)) + 5000), color = "black", size = .8, arrow = arrow(type = "open", ends = "both", length = unit(0.1, "inches"))) +
+  annotate("text", size = 3, hjust = 0, x = 2.05, y = (exp(avg_treated_13) + (exp(avg_control_13) - exp(avg_control_12) + exp(avg_treated_12)))/2, label= "Estimated Effect", color = "black") +
+  annotate("text", size = 3, hjust = 0, x = 2.05, y = exp(avg_treated_13), label= "Relabeled", color = "#00047A") + 
+  annotate("text", size = 3, hjust = 0, x = 2.05, y = exp(avg_control_13), label= "Not Relabeled", color = "#7E84F7") +
+  annotate("text", size = 3, hjust = 0, x = 2.05, y = exp(avg_control_13) - exp(avg_control_12) + exp(avg_treated_12), label= "Expected Increase\nif No Effect", color = "#C51E3A") +
+  scale_color_manual(values = c("Relabeled" = "#00047A", "Not Relabeled" = "#7E84F7")) +
+  scale_y_continuous(limits = c(1170000, 1550000), labels = label_number(prefix = "$", big.mark = ",")) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none"))
+```
+
+## Matching Method
+```{r, warning=FALSE, message=FALSE}
+dataNYCwideSalePrice <- filter(dataNYCwideSalePrice, !is.na(Floor_12), !is.na(AVG_12TH_SQFT))
+
+match.out <- matchit(TRECE ~ Floor_12 + AVG_12TH_SQFT, # match on 12th floor prices ('Floor_12') and size ('AVG_12TH_SQFT')
+                     data = dataNYCwideSalePrice, 
+                     method = "nearest", 
+                     distance = "mahalanobis", 
+                     replace = FALSE, 
+                     ratio = 1)
+
+# plot density distributions 
+plot(match.out, type = "density")
+summary(match.out)
+
+matchedData <- match.data(match.out, data = dataNYCwideSalePrice, group = "all")
+matchedData <- matchedData[order(matchedData$subclass, decreasing = FALSE),]
+
+# our treatment group consists of buildings that relabeled the 13th floor
+matchedTreated <- matchedData[which(matchedData$TRECE == FALSE),]
+matchedControl <- matchedData[which(matchedData$TRECE == TRUE),]
+
+# extract the 13th floor values for both matched treated and control groups 
+matched_treated_13 <- matchedTreated$Floor_13
+matched_control_13 <- matchedControl$Floor_13
+```
+
+```{r, warning=FALSE, message=FALSE}
+# calculate the mean difference 
+mean_difference <- mean(matched_treated_13 - matched_control_13, na.rm = TRUE)
+```
+
+The average price increase in non-relabeled buildings to relabeled buildings is `r round((exp(mean_difference) - 1) * 100, 1)`%. \n
+
+### Average Condo Price per Floor in Unmatched and Matched Buildings
+```{r, warning=FALSE, message=FALSE}
+# calculate the average value for each floor
+average_prices <- dataNYC %>%
+  filter(APT_FLOOR >= 10 & APT_FLOOR <= 15) %>% 
+  group_by(APT_FLOOR, TRECE) %>%
+  summarize(AvgPrice = exp(mean(LOG_SALE_PRICE, na.rm = TRUE))) %>%
+  ungroup() 
+
+# plot the averages as a bar chart
+plot3 <- ggplot(average_prices, aes(x = as.factor(APT_FLOOR), y = AvgPrice, fill = as.factor(TRECE))) +
+  geom_bar(stat = "identity", position = "identity", color = "black", alpha = 0.9) +
+  xlab("True Floor") + ylab("Average Sale Price") + labs(fill = "13th Floor") +
+  scale_fill_manual(values = c("#00047A", "#7E84F7"), labels = c("Relabeled", "Not Relabeled")) +
+  scale_y_continuous(limits = c(0, 1650000), labels = dollar_format()) + 
+  theme_minimal(base_size = 12)
+
+# reshape the data from wide to long format
+data_long <- matchedData %>%
+  pivot_longer(cols = starts_with("Floor_"), names_to = "Floor", values_to = "Value") %>%
+  mutate(Floor = as.numeric(str_remove(Floor, "Floor_"))) %>%
+  filter(!is.na(Floor), Floor >= min(dataNYC$APT_FLOOR, na.rm = TRUE), Floor <= max(dataNYC$APT_FLOOR, na.rm = TRUE)) 
+
+# calculate the average value for desired floors
+average_values <- data_long %>%
+  filter(Floor >= 10 & Floor <= 15) %>% 
+  group_by(Floor, TRECE) %>%
+  summarise(Average_Value = mean(Value, na.rm = TRUE))
+
+# plot the averages as a bar chart
+plot4 <- ggplot(average_values, aes(x = as.factor(Floor), y = exp(Average_Value), fill = as.factor(TRECE))) +
+  geom_bar(stat = "identity", position = "identity", color = "black", alpha = 0.9) +
+  xlab("Floor") + ylab("Average Condo Price After Matching") + labs(fill = "13th Floor") +
+  scale_fill_manual(values = c("#00047A", "#7E84F7"), labels = c("Relabeled", "Not Relabeled")) +
+  scale_y_continuous(limits = c(0, 1650000), labels = dollar_format()) + 
+  theme_minimal(base_size = 12)
+
+# combine plots
+ggarrange(plot3 + ylab("Average Sale Price Before Matching"), plot4 + ylab("Average Sale Price After Matching"), ncol = 2, common.legend = TRUE, legend = "right")
+```
+
+### Covariate Balance Plots
+```{r message=FALSE, warning=FALSE}
+dataNYCwideSalePrice$MATCHED <- "Unmatched" # all buildings
+matchedData$MATCHED <- "Matched" # only buildings we matched on
+
+# function that returns the average of the covariate for control/treatment and matched/unmatched
+calculate_stats <- function(data, covariate) {
+    stats <- data %>%
+      group_by(TRECE, MATCHED) %>%
+      summarise(STATISTIC = mean(get(covariate), na.rm = TRUE)) 
+  return(stats)}
+
+# function that plots the calculate_stats output
+create_covariate_balance_plot <- function(data, yaxis) {
+  ggplot(data, aes(x = MATCHED, y = STATISTIC, fill = TRECE)) +
+    geom_bar(stat = "identity", position = position_dodge(), alpha = 0.9, color = "black") +
+    labs(x = '', y = yaxis, fill = '') +
+    scale_fill_manual(values = c("#00047A", "#7E84F7"), labels = c("Relabeled", "Not Relabeled")) + 
+    theme_minimal(base_size = 12)}
+
+# balance plot for 13th floor size
+combined_stats <- rbind(
+  calculate_stats(dataNYCwideSalePrice, 'AVG_13TH_SQFT'),
+  calculate_stats(matchedData, 'AVG_13TH_SQFT'))
+
+combined_stats$MATCHED <- factor(combined_stats$MATCHED, levels = c("Unmatched", "Matched"))
+plot7 <- create_covariate_balance_plot(combined_stats, 'Average Square Footage') + coord_cartesian(ylim = c(150, 1600)) +
+  scale_y_continuous(breaks = seq(150, 1600, by = 450))
+
+# balance plot for building construction year
+combined_stats <- rbind(
+  calculate_stats(dataNYCwideSalePrice, 'AVG_13TH_YRBUILT'),
+  calculate_stats(matchedData, 'AVG_13TH_YRBUILT')) 
+combined_stats$MATCHED <- factor(combined_stats$MATCHED, levels = c("Unmatched", "Matched"))
+plot8 <- create_covariate_balance_plot(combined_stats, 'Average Construction Year') + coord_cartesian(ylim = c(1800, 2000)) +
+  scale_y_continuous(breaks = seq(1800, 2000, by = 50))
+
+# combined plot
+ggarrange(plot7, plot8, ncol = 2, common.legend = TRUE, legend = "right")
+```
