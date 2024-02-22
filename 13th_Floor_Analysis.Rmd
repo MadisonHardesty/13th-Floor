@@ -271,7 +271,7 @@ calculate_stats <- function(data, covariate) {
 create_covariate_balance_plot <- function(data, yaxis) {
   ggplot(data, aes(x = MATCHED, y = STATISTIC, fill = TRECE)) +
     geom_bar(stat = "identity", position = position_dodge(), alpha = 0.9, color = "black") +
-    labs(x = '', y = yaxis, fill = '') +
+    labs(x = '', y = yaxis, fill = '13th Floor') +
     scale_fill_manual(values = c("#00047A", "#7E84F7"), labels = c("Relabeled", "Not Relabeled")) + 
     theme_minimal(base_size = 12)}
 
@@ -435,7 +435,7 @@ average_values <- data_long %>%
 # plot the averages as a bar chart
 plot4 <- ggplot(average_values, aes(x = as.factor(Floor), y = exp(Average_Value), fill = as.factor(TRECE))) +
   geom_bar(stat = "identity", position = "identity", color = "black", alpha = 0.9) +
-  xlab("Floor") + ylab("Average Condo Price After Matching") + labs(fill = "13th Floor") +
+  xlab("True Floor") + ylab("Average Condo Price After Matching") + labs(fill = "13th Floor") +
   scale_fill_manual(values = c("#00047A", "#7E84F7"), labels = c("Relabeled", "Not Relabeled")) +
   scale_y_continuous(limits = c(0, 1650000), labels = dollar_format()) + 
   theme_minimal(base_size = 12)
@@ -460,7 +460,7 @@ calculate_stats <- function(data, covariate) {
 create_covariate_balance_plot <- function(data, yaxis) {
   ggplot(data, aes(x = MATCHED, y = STATISTIC, fill = TRECE)) +
     geom_bar(stat = "identity", position = position_dodge(), alpha = 0.9, color = "black") +
-    labs(x = '', y = yaxis, fill = '') +
+    labs(x = '', y = yaxis, fill = '13th Floor') +
     scale_fill_manual(values = c("#00047A", "#7E84F7"), labels = c("Relabeled", "Not Relabeled")) + 
     theme_minimal(base_size = 12)}
 
