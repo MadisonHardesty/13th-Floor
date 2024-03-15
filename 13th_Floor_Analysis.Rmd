@@ -24,6 +24,7 @@ Does relabeling the 13th floor increase the price of the properties on that floo
 
 # Data Source
 We consider both the market value of condos as assessed by the New York City Department of Finance in 2023 ([bit.ly/492AQYi](bit.ly/492AQYi)), and the most-recent sales price of the condos that were sold in the last 20 years ([bit.ly/48oppd1](bit.ly/48oppd1)). \n
+
 **Note:** See 13th_Floor_Prep.R for details on how we merged and prepared the data.\n 
 
 ## Variable Definitions 
@@ -35,8 +36,8 @@ data.frame(
                   "The block the building is located on.",
                   "Building identifier created by combining the property's BORO, BLOCK, CONDO_NUMBER, BLD_FRT, BLD_DEP.",
                   "The number of stories/floors in the building.",
-                  "The frontage of the lot",
-                  "The depth of the lot",
+                  "The frontage of the lot.",
+                  "The depth of the lot.",
                   "The condominium identification number.",
                   "The number of residential units.",
                   "The apartment number.",
@@ -44,8 +45,8 @@ data.frame(
                   "Indicates the presence (TRUE) or absence (FALSE) of a 13th floor in the building. If it is 'missing' the 13th floor, then it was relabeled.",
                   "The market value of the unit.",
                   "The sale price of the unit.",
-                  "The year the building was built",
-                  "The gross square footage of the unit"
+                  "The year the building was built.",
+                  "The gross square footage of the unit."
   )
 ) %>%
   arrange(Variable) %>%
@@ -68,7 +69,7 @@ dataNYCwide <- function(data, value_col) {
       names_from = APT_FLOOR,
       values_from = value_col,
       names_sort = TRUE) %>%
-    left_join(distinct(select(dataNYC, BLD_ID, AVG_12TH_SQFT, AVG_13TH_SQFT, AVG_13TH_YRBUILT)), by = "BLD_ID")
+    left_join(distinct(select(dataNYC, BLD_ID, BORO, AVG_12TH_SQFT, AVG_13TH_SQFT, AVG_13TH_YRBUILT)), by = "BLD_ID")
   }
 
 dataNYCwideMarketValue <- dataNYCwide(dataNYC, "AVG_LOG_MARKET_VALUE_PER_FLOOR")
@@ -209,13 +210,14 @@ matched_control_13 <- matchedControl$Floor_13
 
 ```{r, warning=FALSE, message=FALSE}
 # calculate the mean difference in log prices 
-mean_difference <- mean(matched_treated_13 - matched_control_13, na.rm = TRUE)
+mean_difference <- mean(matched_treated_13, na.rm = TRUE) - mean(matched_control_13, na.rm = TRUE)
 ```
 
 The average price increase in non-relabeled buildings to relabeled buildings is `r round((exp(mean_difference) - 1) * 100, 1)`%. \n
 
 ### Average Condo Price per Floor in Unmatched and Matched Buildings
 ```{r, warning=FALSE, message=FALSE}
+## Before Matching
 # calculate the average value for each floor
 average_prices <- dataNYC %>%
   filter(APT_FLOOR >= 10 & APT_FLOOR <= 15) %>% 
@@ -226,11 +228,12 @@ average_prices <- dataNYC %>%
 # plot the averages as a bar chart
 plot3 <- ggplot(average_prices, aes(x = as.factor(APT_FLOOR), y = AvgPrice, fill = as.factor(TRECE))) +
   geom_bar(stat = "identity", position = "identity", color = "black", alpha = 0.9) +
-  xlab("True Floor") + ylab("Average Sale Price") + labs(fill = "13th Floor") +
+  xlab("True Floor") + ylab("Average Market Value") + labs(fill = "13th Floor") +
   scale_fill_manual(values = c("#00047A", "#7E84F7"), labels = c("Relabeled", "Not Relabeled")) +
   scale_y_continuous(limits = c(0, 340000), labels = dollar_format()) + 
   theme_minimal(base_size = 12)
 
+# After Matching
 # reshape the data from wide to long format
 data_long <- matchedData %>%
   pivot_longer(cols = starts_with("Floor_"), names_to = "Floor", values_to = "Value") %>%
@@ -261,39 +264,99 @@ dataNYCwideMarketValue$MATCHED <- "Unmatched" # all buildings
 matchedData$MATCHED <- "Matched" # only buildings we matched on
 
 # function that returns the average of the covariate for control/treatment and matched/unmatched
-calculate_stats <- function(data, covariate) {
-    stats <- data %>%
-      group_by(TRECE, MATCHED) %>%
-      summarise(STATISTIC = mean(get(covariate), na.rm = TRUE)) 
+calculate_avg <- function(data, covariate) {
+  stats <- data %>%
+    group_by(TRECE, MATCHED) %>%
+    summarise(STATISTIC = mean(get(covariate), na.rm = TRUE)) 
   return(stats)}
 
-# function that plots the calculate_stats output
+# function that plots the calculate_avg output
 create_covariate_balance_plot <- function(data, yaxis) {
   ggplot(data, aes(x = MATCHED, y = STATISTIC, fill = TRECE)) +
     geom_bar(stat = "identity", position = position_dodge(), alpha = 0.9, color = "black") +
-    labs(x = '', y = yaxis, fill = '13th Floor') +
+    labs(x = '', y = yaxis, fill = "13th Floor") +
     scale_fill_manual(values = c("#00047A", "#7E84F7"), labels = c("Relabeled", "Not Relabeled")) + 
     theme_minimal(base_size = 12)}
 
 # balance plot for 13th floor size
-combined_stats <- rbind(
-  calculate_stats(dataNYCwideMarketValue, 'AVG_13TH_SQFT'),
-  calculate_stats(matchedData, 'AVG_13TH_SQFT'))
+combined_avg <- rbind(
+  calculate_avg(dataNYCwideMarketValue, 'AVG_13TH_SQFT'),
+  calculate_avg(matchedData, 'AVG_13TH_SQFT'))
 
-combined_stats$MATCHED <- factor(combined_stats$MATCHED, levels = c("Unmatched", "Matched"))
-plot7 <- create_covariate_balance_plot(combined_stats, 'Average Square Footage') + coord_cartesian(ylim = c(150, 1600)) +
+combined_avg$MATCHED <- factor(combined_avg$MATCHED, levels = c("Unmatched", "Matched"))
+plot7 <- create_covariate_balance_plot(combined_avg, 'Average Square Footage') + coord_cartesian(ylim = c(150, 1600)) +
   scale_y_continuous(breaks = seq(150, 1600, by = 450))
 
 # balance plot for building construction year
-combined_stats <- rbind(
-  calculate_stats(dataNYCwideMarketValue, 'AVG_13TH_YRBUILT'),
-  calculate_stats(matchedData, 'AVG_13TH_YRBUILT')) 
-combined_stats$MATCHED <- factor(combined_stats$MATCHED, levels = c("Unmatched", "Matched"))
-plot8 <- create_covariate_balance_plot(combined_stats, 'Average Construction Year') + coord_cartesian(ylim = c(1800, 2000)) +
-  scale_y_continuous(breaks = seq(1800, 2000, by = 50))
+combined_avg <- rbind(
+  calculate_avg(dataNYCwideMarketValue, 'AVG_13TH_YRBUILT'),
+  calculate_avg(matchedData, 'AVG_13TH_YRBUILT')) 
+combined_avg$MATCHED <- factor(combined_avg$MATCHED, levels = c("Unmatched", "Matched"))
+plot8 <- create_covariate_balance_plot(combined_avg, 'Average Construction Year') + coord_cartesian(ylim = c(1950, 1990)) +
+  scale_y_continuous(breaks = seq(1950, 1990, by = 10))
 
 # combined plot
 ggarrange(plot7, plot8, ncol = 2, common.legend = TRUE, legend = "right")
+```
+
+```{r, warning=FALSE, message=FALSE}
+# function that returns the proportion of the covariate for control/treatment and matched/unmatched
+calculate_prop <- function(data, covariate, factor_value) {
+  stats <- data %>%
+    group_by(TRECE, MATCHED) %>%
+    summarise(count = n(),
+              STATISTIC = sum(get(covariate) == factor_value, na.rm = TRUE) / count) 
+  return(stats)}
+
+# function that plots the calculate_prop output
+create_covariate_balance_plot <- function(data, yaxis) {
+  ggplot(data, aes(x = MATCHED, y = STATISTIC, fill = TRECE)) +
+    geom_bar(stat = "identity", position = position_dodge(), alpha = 0.9, color = "black") +
+    labs(x = '', y = yaxis, fill = "13th Floor") +
+    scale_fill_manual(values = c("#00047A", "#7E84F7"), labels = c("Relabeled", "Not Relabeled")) + 
+    theme_minimal(base_size = 12)}
+
+# Manhattan
+combined_prop <- rbind(
+  calculate_prop(dataNYCwideMarketValue, 'BORO', "1"),
+  calculate_prop(matchedData, 'BORO', "1"))
+
+combined_prop$MATCHED <- factor(combined_prop$MATCHED, levels = c("Unmatched", "Matched"))
+Manhattan <- create_covariate_balance_plot(combined_prop, 'Proportion in Manhattan')
+
+# Brooklyn
+combined_prop <- rbind(
+  calculate_prop(dataNYCwideMarketValue, 'BORO', "2"),
+  calculate_prop(matchedData, 'BORO', "2"))
+
+combined_prop$MATCHED <- factor(combined_prop$MATCHED, levels = c("Unmatched", "Matched"))
+Brooklyn <- create_covariate_balance_plot(combined_prop, 'Proportion in Brooklyn')
+
+# Queens
+combined_prop <- rbind(
+  calculate_prop(dataNYCwideMarketValue, 'BORO', "3"),
+  calculate_prop(matchedData, 'BORO', "3"))
+
+combined_prop$MATCHED <- factor(combined_prop$MATCHED, levels = c("Unmatched", "Matched"))
+Queens <- create_covariate_balance_plot(combined_prop, 'Proportion in Queens')
+
+# The Bronx
+combined_prop <- rbind(calculate_prop(dataNYCwideMarketValue, 'BORO', "4"),
+  calculate_prop(matchedData, 'BORO', "4")) 
+
+combined_prop$MATCHED <- factor(combined_prop$MATCHED, levels = c("Unmatched", "Matched"))
+Bronx <- create_covariate_balance_plot(combined_prop, 'Proportion in the Bronx')
+
+# Staten Island
+combined_prop <- rbind(
+  calculate_prop(dataNYCwideMarketValue, 'BORO', "5"),
+  calculate_prop(matchedData, 'BORO', "5"))
+
+combined_prop$MATCHED <- factor(combined_prop$MATCHED, levels = c("Unmatched", "Matched"))
+SI <- create_covariate_balance_plot(combined_prop, 'Proportion in Staten Island')
+
+# combined plot
+ggarrange(Manhattan, Brooklyn, Queens, Bronx, SI, common.legend = TRUE, legend = "right")
 ```
 
 # Sale Price Analysis
@@ -398,7 +461,7 @@ matched_control_13 <- matchedControl$Floor_13
 
 ```{r, warning=FALSE, message=FALSE}
 # calculate the mean difference 
-mean_difference <- mean(matched_treated_13 - matched_control_13, na.rm = TRUE)
+mean_difference <- mean(matched_treated_13, na.rm = TRUE) - mean(matched_control_13, na.rm = TRUE)
 ```
 
 The average price increase in non-relabeled buildings to relabeled buildings is `r round((exp(mean_difference) - 1) * 100, 1)`%. \n
@@ -450,37 +513,97 @@ dataNYCwideSalePrice$MATCHED <- "Unmatched" # all buildings
 matchedData$MATCHED <- "Matched" # only buildings we matched on
 
 # function that returns the average of the covariate for control/treatment and matched/unmatched
-calculate_stats <- function(data, covariate) {
-    stats <- data %>%
-      group_by(TRECE, MATCHED) %>%
-      summarise(STATISTIC = mean(get(covariate), na.rm = TRUE)) 
+calculate_avg <- function(data, covariate) {
+  stats <- data %>%
+    group_by(TRECE, MATCHED) %>%
+    summarise(STATISTIC = mean(get(covariate), na.rm = TRUE)) 
   return(stats)}
 
-# function that plots the calculate_stats output
+# function that plots the calculate_avg output
 create_covariate_balance_plot <- function(data, yaxis) {
   ggplot(data, aes(x = MATCHED, y = STATISTIC, fill = TRECE)) +
     geom_bar(stat = "identity", position = position_dodge(), alpha = 0.9, color = "black") +
-    labs(x = '', y = yaxis, fill = '13th Floor') +
+    labs(x = '', y = yaxis, fill = "13th Floor") +
     scale_fill_manual(values = c("#00047A", "#7E84F7"), labels = c("Relabeled", "Not Relabeled")) + 
     theme_minimal(base_size = 12)}
 
 # balance plot for 13th floor size
-combined_stats <- rbind(
-  calculate_stats(dataNYCwideSalePrice, 'AVG_13TH_SQFT'),
-  calculate_stats(matchedData, 'AVG_13TH_SQFT'))
+combined_avg <- rbind(
+  calculate_avg(dataNYCwideSalePrice, 'AVG_13TH_SQFT'),
+  calculate_avg(matchedData, 'AVG_13TH_SQFT'))
 
-combined_stats$MATCHED <- factor(combined_stats$MATCHED, levels = c("Unmatched", "Matched"))
-plot7 <- create_covariate_balance_plot(combined_stats, 'Average Square Footage') + coord_cartesian(ylim = c(150, 1600)) +
+combined_avg$MATCHED <- factor(combined_avg$MATCHED, levels = c("Unmatched", "Matched"))
+plot7 <- create_covariate_balance_plot(combined_avg, 'Average Square Footage') + coord_cartesian(ylim = c(150, 1600)) +
   scale_y_continuous(breaks = seq(150, 1600, by = 450))
 
 # balance plot for building construction year
-combined_stats <- rbind(
-  calculate_stats(dataNYCwideSalePrice, 'AVG_13TH_YRBUILT'),
-  calculate_stats(matchedData, 'AVG_13TH_YRBUILT')) 
-combined_stats$MATCHED <- factor(combined_stats$MATCHED, levels = c("Unmatched", "Matched"))
-plot8 <- create_covariate_balance_plot(combined_stats, 'Average Construction Year') + coord_cartesian(ylim = c(1800, 2000)) +
-  scale_y_continuous(breaks = seq(1800, 2000, by = 50))
+combined_avg <- rbind(
+  calculate_avg(dataNYCwideSalePrice, 'AVG_13TH_YRBUILT'),
+  calculate_avg(matchedData, 'AVG_13TH_YRBUILT')) 
+combined_avg$MATCHED <- factor(combined_avg$MATCHED, levels = c("Unmatched", "Matched"))
+plot8 <- create_covariate_balance_plot(combined_avg, 'Average Construction Year') + coord_cartesian(ylim = c(1950, 2000)) +
+  scale_y_continuous(breaks = seq(1950, 2000, by = 10))
 
 # combined plot
 ggarrange(plot7, plot8, ncol = 2, common.legend = TRUE, legend = "right")
+```
+
+```{r, warning=FALSE, message=FALSE}
+# function that returns the proportion of the covariate for control/treatment and matched/unmatched
+calculate_prop <- function(data, covariate, factor_value) {
+  stats <- data %>%
+    group_by(TRECE, MATCHED) %>%
+    summarise(count = n(),
+              STATISTIC = sum(get(covariate) == factor_value, na.rm = TRUE) / count) 
+  return(stats)}
+
+# function that plots the calculate_prop output
+create_covariate_balance_plot <- function(data, yaxis) {
+  ggplot(data, aes(x = MATCHED, y = STATISTIC, fill = TRECE)) +
+    geom_bar(stat = "identity", position = position_dodge(), alpha = 0.9, color = "black") +
+    labs(x = '', y = yaxis, fill = "13th Floor") +
+    scale_fill_manual(values = c("#00047A", "#7E84F7"), labels = c("Relabeled", "Not Relabeled")) + 
+    theme_minimal(base_size = 12)}
+
+# Manhattan
+combined_prop <- rbind(
+  calculate_prop(dataNYCwideSalePrice, 'BORO', "1"),
+  calculate_prop(matchedData, 'BORO', "1"))
+
+combined_prop$MATCHED <- factor(combined_prop$MATCHED, levels = c("Unmatched", "Matched"))
+Manhattan <- create_covariate_balance_plot(combined_prop, 'Proportion in Manhattan')
+
+# Brooklyn
+combined_prop <- rbind(
+  calculate_prop(dataNYCwideSalePrice, 'BORO', "2"),
+  calculate_prop(matchedData, 'BORO', "2"))
+
+combined_prop$MATCHED <- factor(combined_prop$MATCHED, levels = c("Unmatched", "Matched"))
+Brooklyn <- create_covariate_balance_plot(combined_prop, 'Proportion in Brooklyn')
+
+# Queens
+combined_prop <- rbind(
+  calculate_prop(dataNYCwideSalePrice, 'BORO', "3"),
+  calculate_prop(matchedData, 'BORO', "3"))
+
+combined_prop$MATCHED <- factor(combined_prop$MATCHED, levels = c("Unmatched", "Matched"))
+Queens <- create_covariate_balance_plot(combined_prop, 'Proportion in Queens')
+
+# The Bronx
+combined_prop <- rbind(calculate_prop(dataNYCwideSalePrice, 'BORO', "4"),
+  calculate_prop(matchedData, 'BORO', "4")) 
+
+combined_prop$MATCHED <- factor(combined_prop$MATCHED, levels = c("Unmatched", "Matched"))
+Bronx <- create_covariate_balance_plot(combined_prop, 'Proportion in the Bronx')
+
+# Staten Island
+combined_prop <- rbind(
+  calculate_prop(dataNYCwideSalePrice, 'BORO', "5"),
+  calculate_prop(matchedData, 'BORO', "5"))
+
+combined_prop$MATCHED <- factor(combined_prop$MATCHED, levels = c("Unmatched", "Matched"))
+SI <- create_covariate_balance_plot(combined_prop, 'Proportion in Staten Island')
+
+# combined plot
+ggarrange(Manhattan, Brooklyn, Queens, Bronx, SI, common.legend = TRUE, legend = "right")
 ```
